@@ -1,0 +1,69 @@
+package com.demo.aiknowledge.controller;
+
+import com.demo.aiknowledge.common.Result;
+import com.demo.aiknowledge.dto.ChangePasswordRequest;
+import com.demo.aiknowledge.dto.LoginRequest;
+import com.demo.aiknowledge.dto.RegisterRequest;
+import com.demo.aiknowledge.dto.UpdateUserRequest;
+import com.demo.aiknowledge.entity.User;
+import com.demo.aiknowledge.service.AuthService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/auth")
+@RequiredArgsConstructor
+public class AuthController {
+
+    private final AuthService authService;
+
+    @PostMapping("/sendCode")
+    public Result<String> sendCode(@RequestParam String phone) {
+        authService.sendSmsCode(phone);
+        return Result.success("Verification code sent");
+    }
+
+    @PostMapping("/register")
+    public Result<Map<String, Object>> register(@RequestBody RegisterRequest request) {
+        Map<String, Object> result = authService.register(request.getPhone(), request.getCode(), request.getPassword(), request.getUsername());
+        return Result.success(result);
+    }
+
+    @PostMapping("/login")
+    public Result<Map<String, Object>> login(@RequestBody LoginRequest request) {
+        Map<String, Object> result = authService.login(request.getPhone(), request.getPassword());
+        return Result.success(result);
+    }
+
+    @PostMapping("/update")
+    public Result<User> updateUserInfo(@RequestBody UpdateUserRequest request) {
+        // 从 token 中获取 userId，不信任客户端传入
+        Long userId = Long.parseLong(SecurityContextHolder.getContext().getAuthentication().getName());
+        request.setUserId(userId);
+        User user = authService.updateUserInfo(request);
+        return Result.success(user);
+    }
+
+    @GetMapping("/profile")
+    public Result<User> getProfile() {
+        Long userId = Long.parseLong(SecurityContextHolder.getContext().getAuthentication().getName());
+        User user = authService.getUserById(userId);
+        return Result.success(user);
+    }
+
+    @PostMapping("/changePassword")
+    public Result<String> changePassword(@RequestBody ChangePasswordRequest request) {
+        Long userId = Long.parseLong(SecurityContextHolder.getContext().getAuthentication().getName());
+        authService.changePassword(userId, request.getOldPassword(), request.getNewPassword());
+        return Result.success("密码修改成功");
+    }
+
+    @PostMapping("/refresh")
+    public Result<Map<String, Object>> refreshToken(@RequestHeader("Authorization") String token) {
+        Map<String, Object> result = authService.refreshToken(token);
+        return Result.success(result);
+    }
+}

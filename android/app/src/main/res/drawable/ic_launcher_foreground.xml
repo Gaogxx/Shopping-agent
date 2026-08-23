@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 袋子主体（微梯形，下宽上窄） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,46 L33,82 Q34,86 38,86 L70,86 Q74,86 75,82 L78,46 Q78,42 74,42 L34,42 Q30,42 30,46 Z" />
+
+    <!-- 左把手 -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M42,42 Q42,28 54,28 Q66,28 66,42" />
+
+</vector>

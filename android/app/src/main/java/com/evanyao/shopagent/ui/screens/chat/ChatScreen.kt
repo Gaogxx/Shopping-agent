@@ -1,0 +1,965 @@
+package com.evanyao.shopagent.ui.screens.chat
+
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.evanyao.shopagent.data.model.Conversation
+import com.evanyao.shopagent.data.model.Message
+import com.evanyao.shopagent.data.model.ProductSku
+import com.evanyao.shopagent.ui.components.AiAvatar
+import com.evanyao.shopagent.ui.components.AsyncImageWithPlaceholder
+import com.evanyao.shopagent.ui.components.EmptyState
+import com.evanyao.shopagent.ui.components.MessageBubble
+import com.evanyao.shopagent.ui.components.RecommendSection
+import com.evanyao.shopagent.ui.components.buildImageUrl
+import com.evanyao.shopagent.viewmodel.ChatViewModel
+import com.evanyao.shopagent.viewmodel.InputMode
+import kotlinx.coroutines.launch
+
+/**
+ * 对话页面 — 应用的核心界面
+ *
+ * 布局结构：
+ * - ModalNavigationDrawer：左侧会话列表侧边栏
+ *   - 会话列表（按置顶+时间排序）
+ *   - 新建会话按钮
+ *   - 长按菜单（重命名/删除/置顶）
+ * - Scaffold：主内容区
+ *   - TopAppBar：会话标题 + 菜单按钮
+ *   - LazyColumn：消息列表
+ *     - 空状态：推荐问题区域
+ *     - 历史消息：MessageBubble 组件
+ *     - 流式输出：实时更新的 StreamingText
+ *     - 加载指示器：TypingIndicator
+ *   - 底部输入区域：
+ *     - 📷 拍照/选图按钮（带 Tooltip）
+ *     - 🎤/⌨️ 模式切换按钮（文字/语音）
+ *     - 输入框 / 语音录制区域
+ *     - 发送/停止按钮
+ * - Snackbar：错误提示
+ * - SKU 选择弹窗：购物车加购规格选择
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ChatScreen(
+    viewModel: ChatViewModel,
+    onProductClick: (Long) -> Unit,
+    onAddToCart: ((List<Long>) -> Unit)? = null,
+    onCameraClick: (() -> Unit)? = null,
+    onVoiceStart: (() -> Unit)? = null,
+    onVoiceEnd: (() -> Unit)? = null
+) {
+    val uiState by viewModel.uiState.collectAsState()
+    var inputText by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    var showDeleteDialog by remember { mutableStateOf<Conversation?>(null) }
+    var showRenameDialog by remember { mutableStateOf<Conversation?>(null) }
+    var renameText by remember { mutableStateOf("") }
+
+    val recommendations = uiState.recommendations
+
+    // SKU 选择状态
+    val skuSelectionProduct by viewModel.skuSelectionProduct.collectAsState()
+    val skuSelectionList by viewModel.skuSelectionList.collectAsState()
+
+    // 语音识别完成后，将结果填入输入框
+    LaunchedEffect(uiState.pendingVoiceText) {
+        uiState.pendingVoiceText?.let { text ->
+            inputText = text
+            viewModel.clearPendingVoiceText()
+        }
+    }
+
+    // 自动滚动到底部（包括流式输出时）
+    LaunchedEffect(uiState.messages.size, uiState.isSending, uiState.streamingContent) {
+        if (uiState.messages.isNotEmpty() || uiState.isStreaming) {
+            val targetIndex = uiState.messages.size
+            if (targetIndex > 0) {
+                listState.animateScrollToItem(targetIndex - 1)
+            }
+        }
+    }
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet(
+                modifier = Modifier.width(280.dp),
+                windowInsets = WindowInsets(0, 0, 0, 0)
+            ) {
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "会话列表",
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                    IconButton(
+                        onClick = {
+                            viewModel.clearCurrentConversation()
+                            scope.launch { drawerState.close() }
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.ChatBubbleOutline,
+                            contentDescription = "新对话"
+                        )
+                    }
+                }
+
+                HorizontalDivider()
+
+                val drawerListState = rememberLazyListState()
+
+                if (uiState.conversations.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "暂无会话\n点击右上角气泡新建",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        LazyColumn(
+                            state = drawerListState,
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            items(uiState.conversations) { conversation ->
+                                ConversationDrawerItem(
+                                    conversation = conversation,
+                                    isSelected = uiState.currentConversation?.id == conversation.id,
+                                    onClick = {
+                                        viewModel.selectConversation(conversation)
+                                        scope.launch { drawerState.close() }
+                                    },
+                                    onPin = {
+                                        viewModel.pinConversation(conversation.id, !conversation.isPinned)
+                                    },
+                                    onDelete = { showDeleteDialog = conversation },
+                                    onRename = {
+                                        renameText = conversation.title ?: ""
+                                        showRenameDialog = conversation
+                                    }
+                                )
+                            }
+                        }
+
+                        val layoutInfo = drawerListState.layoutInfo
+                        val viewportHeight = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
+                        val visibleItems = layoutInfo.visibleItemsInfo
+                        val avgItemHeight = if (visibleItems.isNotEmpty()) {
+                            visibleItems.sumOf { it.size } / visibleItems.size
+                        } else 60
+                        val totalContentHeight = avgItemHeight * uiState.conversations.size
+
+                        if (totalContentHeight > viewportHeight) {
+                            val density = LocalDensity.current
+                            val thumbRatio = (viewportHeight.toFloat() / totalContentHeight).coerceIn(0.1f, 0.6f)
+                            val trackHeightPx = viewportHeight.toFloat() - 16f
+                            val thumbHeightPx = trackHeightPx * thumbRatio
+
+                            val maxScroll = (totalContentHeight - viewportHeight).coerceAtLeast(1)
+                            val firstItem = visibleItems.firstOrNull()
+                            val scrolledPast = if (firstItem != null) {
+                                firstItem.index * avgItemHeight + drawerListState.firstVisibleItemScrollOffset
+                            } else 0
+                            val fraction = (scrolledPast.toFloat() / maxScroll).coerceIn(0f, 1f)
+                            val thumbTravel = trackHeightPx - thumbHeightPx
+                            val thumbOffsetDp = density.run { (thumbTravel * fraction).toDp() }
+                            val thumbHeightDp = density.run { thumbHeightPx.toDp() }
+
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.CenterEnd)
+                                    .width(6.dp)
+                                    .fillMaxHeight()
+                                    .padding(vertical = 8.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(Color(0x22000000))
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(6.dp)
+                                        .height(thumbHeightDp)
+                                        .offset(y = thumbOffsetDp)
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .imePadding()
+        ) {
+            TopAppBar(
+                title = {
+                    Text(
+                        text = uiState.currentConversation?.title ?: "智能导购",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                },
+                navigationIcon = {
+                    IconButton(
+                        onClick = { scope.launch { drawerState.open() } }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Menu,
+                            contentDescription = "会话列表"
+                        )
+                    }
+                },
+                windowInsets = WindowInsets(0, 0, 0, 0)
+            )
+
+            // 消息列表
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    state = listState,
+                    contentPadding = PaddingValues(vertical = 8.dp)
+                ) {
+                    // 推荐问题
+                    if (uiState.messages.isEmpty() && uiState.currentConversation == null) {
+                        item {
+                            RecommendSection(
+                                recommendations = recommendations,
+                                onRecommendClick = { question ->
+                                    viewModel.createConversationAndSendMessage(question)
+                                }
+                            )
+                        }
+                    }
+
+                    // 历史消息
+                    items(uiState.messages) { message ->
+                        MessageBubble(
+                            message = message,
+                            userGender = uiState.userGender,
+                            onProductClick = onProductClick,
+                            onFeedback = { messageId, feedbackType ->
+                                viewModel.submitFeedback(messageId, feedbackType)
+                            },
+                            onConfirmAction = { actionType ->
+                                viewModel.sendConfirmAction(actionType)
+                            },
+                            onAddToCart = { productIds -> viewModel.startAddToCartWithSku(productIds) }
+                        )
+                    }
+
+                    // 流式输出中的消息（实时更新）
+                    if (uiState.isStreaming) {
+                        item {
+                            if (uiState.streamingContent.isNotBlank()) {
+                                val streamingMessage = Message(
+                                    id = -1,
+                                    conversationId = uiState.currentConversation?.id ?: 0,
+                                    role = "assistant",
+                                    content = uiState.streamingContent
+                                )
+                                MessageBubble(
+                                    message = streamingMessage,
+                                    isStreaming = true,
+                                    userGender = uiState.userGender,
+                                    onProductClick = onProductClick
+                                )
+                            } else {
+                                TypingIndicator()
+                            }
+                        }
+                    }
+
+                    // 三点跳动加载动画（非流式发送中）
+                    if (uiState.isSending && !uiState.isStreaming) {
+                        item {
+                            TypingIndicator()
+                        }
+                    }
+                }
+
+                // 滚动条
+                val msgLayoutInfo = listState.layoutInfo
+                val msgViewportHeight = msgLayoutInfo.viewportEndOffset - msgLayoutInfo.viewportStartOffset
+                val msgVisibleItems = msgLayoutInfo.visibleItemsInfo
+                val msgAvgItemHeight = if (msgVisibleItems.isNotEmpty()) {
+                    msgVisibleItems.sumOf { it.size } / msgVisibleItems.size
+                } else 120
+                val msgTotalContentHeight = msgAvgItemHeight * msgLayoutInfo.totalItemsCount
+
+                if (msgTotalContentHeight > msgViewportHeight) {
+                    val density = LocalDensity.current
+                    val thumbRatio = (msgViewportHeight.toFloat() / msgTotalContentHeight).coerceIn(0.1f, 0.6f)
+                    val trackHeightPx = msgViewportHeight.toFloat() - 16f
+                    val thumbHeightPx = trackHeightPx * thumbRatio
+
+                    val maxScroll = (msgTotalContentHeight - msgViewportHeight).coerceAtLeast(1)
+                    val firstItem = msgVisibleItems.firstOrNull()
+                    val scrolledPast = if (firstItem != null) {
+                        firstItem.index * msgAvgItemHeight + listState.firstVisibleItemScrollOffset
+                    } else 0
+                    val fraction = (scrolledPast.toFloat() / maxScroll).coerceIn(0f, 1f)
+                    val thumbTravel = trackHeightPx - thumbHeightPx
+                    val thumbOffsetDp = density.run { (thumbTravel * fraction).toDp() }
+                    val thumbHeightDp = density.run { thumbHeightPx.toDp() }
+
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .width(6.dp)
+                            .fillMaxHeight()
+                            .padding(vertical = 8.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(Color(0x22000000))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(6.dp)
+                                .height(thumbHeightDp)
+                                .offset(y = thumbOffsetDp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
+                        )
+                    }
+                }
+            }
+
+            // 输入区域（模仿豆包布局：[📷] [🎤/⌨️] [输入框] [发送/停止]）
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth(),
+                shadowElevation = 8.dp
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    // ＋ 拍照/相册按钮（带 Tooltip）
+                    TooltipBox(
+                        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                        tooltip = { PlainTooltip { Text("拍照/选图") } },
+                        state = rememberTooltipState()
+                    ) {
+                        IconButton(
+                            onClick = { onCameraClick?.invoke() },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "拍照/相册",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    // 🎤/⌨️ 模式切换按钮（带 Tooltip）
+                    TooltipBox(
+                        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                        tooltip = {
+                            PlainTooltip {
+                                Text(if (uiState.inputMode == InputMode.VOICE) "切换到键盘" else "切换到语音")
+                            }
+                        },
+                        state = rememberTooltipState()
+                    ) {
+                        IconButton(
+                            onClick = { viewModel.toggleInputMode() },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (uiState.inputMode == InputMode.VOICE) {
+                                    Icons.Default.Keyboard
+                                } else {
+                                    Icons.Default.Mic
+                                },
+                                contentDescription = if (uiState.inputMode == InputMode.VOICE) "键盘" else "语音",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    // 输入框或语音按钮
+                    if (uiState.inputMode == InputMode.VOICE) {
+                        // 语音模式：点击开始/停止录音
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .clip(RoundedCornerShape(24.dp))
+                                .background(
+                                    if (uiState.isRecording) {
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    }
+                                )
+                                .clickable {
+                                    if (!uiState.isRecording) {
+                                        onVoiceStart?.invoke()
+                                    } else {
+                                        onVoiceEnd?.invoke()
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                if (uiState.isRecording) {
+                                    // 录音中：蓝色圆圈 + 动画
+                                    Box(
+                                        modifier = Modifier
+                                            .size(12.dp)
+                                            .background(
+                                                MaterialTheme.colorScheme.primary,
+                                                CircleShape
+                                            )
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = "录音中...点击停止",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Mic,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = "点击说话",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        // 文字模式：文本输入框
+                        OutlinedTextField(
+                            value = inputText,
+                            onValueChange = { inputText = it },
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp, max = 120.dp),
+                            placeholder = { Text("输入你的问题...") },
+                            maxLines = 4
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    if (uiState.isStreaming) {
+                        // 流式输出中显示停止按钮
+                        IconButton(
+                            onClick = { viewModel.cancelStream() },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.error)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Stop,
+                                contentDescription = "停止",
+                                tint = MaterialTheme.colorScheme.onError
+                            )
+                        }
+                    } else {
+                        // 发送按钮
+                        IconButton(
+                            onClick = {
+                                if (inputText.isNotBlank()) {
+                                    val text = inputText.trim()
+                                    inputText = ""
+                                    if (uiState.currentConversation == null) {
+                                        viewModel.createConversationAndSendMessage(text)
+                                    } else {
+                                        viewModel.sendMessage(text)
+                                    }
+                                }
+                            },
+                            enabled = inputText.isNotBlank() && !uiState.isSending
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Send,
+                                contentDescription = "发送",
+                                tint = if (inputText.isNotBlank()) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 删除确认对话框
+    showDeleteDialog?.let { conversation ->
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = null },
+            title = { Text("删除会话") },
+            text = { Text("确定要删除「${conversation.title ?: "未命名会话"}」吗？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deleteConversation(conversation.id)
+                        showDeleteDialog = null
+                    }
+                ) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteDialog = null }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    // 重命名对话框
+    showRenameDialog?.let { conversation ->
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = null },
+            title = { Text("重命名会话") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    placeholder = { Text("输入新名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (renameText.isNotBlank()) {
+                            viewModel.renameConversation(conversation.id, renameText.trim())
+                        }
+                        showRenameDialog = null
+                    }
+                ) {
+                    Text("确定")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = null }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    // 错误提示
+    uiState.errorMessage?.let { message ->
+        LaunchedEffect(message) {
+            snackbarHostState.showSnackbar(message)
+            viewModel.clearError()
+        }
+    }
+
+    // 加入购物车规格选择弹窗
+    if (skuSelectionProduct != null && skuSelectionList.isNotEmpty()) {
+        ChatSkuSelectionSheet(
+            productTitle = skuSelectionProduct!!.title,
+            productImageUrl = skuSelectionProduct!!.imageUrl,
+            skus = skuSelectionList,
+            onDismiss = { viewModel.cancelSkuSelection() },
+            onConfirm = { skuId -> viewModel.confirmSkuSelection(skuId) }
+        )
+    }
+
+    SnackbarHost(
+        hostState = snackbarHostState,
+        modifier = Modifier
+            .fillMaxSize()
+            .wrapContentSize(Alignment.BottomCenter)
+    )
+}
+
+/** 对话中加入购物车的规格选择弹窗 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatSkuSelectionSheet(
+    productTitle: String,
+    productImageUrl: String?,
+    skus: List<ProductSku>,
+    onDismiss: () -> Unit,
+    onConfirm: (Long) -> Unit
+) {
+    var selectedIndex by remember { mutableIntStateOf(0) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            // 商品信息 + 标题
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val imageUrl = buildImageUrl(productImageUrl)
+                if (imageUrl != null) {
+                    AsyncImageWithPlaceholder(
+                        model = imageUrl,
+                        contentDescription = productTitle,
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                    )
+                }
+                Column {
+                    Text(
+                        text = "选择规格",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = productTitle,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            // SKU 列表
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 300.dp)
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(skus.size) { index ->
+                    val sku = skus[index]
+                    val isSelected = index == selectedIndex
+                    val bgColor = if (isSelected) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    }
+                    val borderColor = if (isSelected) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        Color.Transparent
+                    }
+
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedIndex = index },
+                        shape = RoundedCornerShape(8.dp),
+                        colors = CardDefaults.cardColors(containerColor = bgColor),
+                        border = androidx.compose.foundation.BorderStroke(
+                            if (isSelected) 2.dp else 0.dp, borderColor
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = sku.propertiesText.ifEmpty { "默认规格" },
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "库存: ${sku.stock}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(
+                                text = "¥${String.format("%.2f", sku.price.toDouble())}",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 确认按钮
+            Button(
+                onClick = {
+                    val selectedSku = skus.getOrNull(selectedIndex)
+                    if (selectedSku != null) {
+                        onConfirm(selectedSku.id)
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .height(50.dp),
+                shape = RoundedCornerShape(25.dp)
+            ) {
+                Text(
+                    text = "确定加入购物车",
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+
+            Spacer(modifier = Modifier.navigationBarsPadding())
+        }
+    }
+}
+
+/**
+ * 三点跳动加载动画
+ */
+@Composable
+fun TypingIndicator() {
+    val infiniteTransition = rememberInfiniteTransition(label = "typing")
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.Start,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // AI 头像
+        AiAvatar(size = 36.dp)
+        Spacer(modifier = Modifier.width(8.dp))
+
+        // 三个跳动的点
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            for (i in 0..2) {
+                val delay = i * 150
+                val offsetY by infiniteTransition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = -8f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(300, delayMillis = delay, easing = LinearEasing),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "dot$i"
+                )
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .graphicsLayer { translationY = offsetY }
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun ConversationDrawerItem(
+    conversation: Conversation,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onPin: () -> Unit,
+    onDelete: () -> Unit,
+    onRename: () -> Unit
+) {
+    val backgroundColor = if (isSelected) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        MaterialTheme.colorScheme.surface
+    }
+    var showMenu by remember { mutableStateOf(false) }
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        color = backgroundColor
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (conversation.isPinned) {
+                Icon(
+                    imageVector = Icons.Default.PushPin,
+                    contentDescription = "已置顶",
+                    modifier = Modifier
+                        .size(14.dp)
+                        .padding(end = 4.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = conversation.title ?: "未命名会话",
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = if (isSelected) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    }
+                )
+                if (conversation.createTime != null) {
+                    Text(
+                        text = conversation.createTime,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isSelected) {
+                            MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                }
+            }
+
+            Box {
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "更多",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text(if (conversation.isPinned) "取消置顶" else "置顶") },
+                        onClick = {
+                            showMenu = false
+                            onPin()
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.PushPin,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("重命名") },
+                        onClick = {
+                            showMenu = false
+                            onRename()
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("删除", color = MaterialTheme.colorScheme.error) },
+                        onClick = {
+                            showMenu = false
+                            onDelete()
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    )
+                }
+            }
+        }
+    }
+}

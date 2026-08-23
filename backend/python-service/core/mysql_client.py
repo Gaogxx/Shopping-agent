@@ -1,0 +1,408 @@
+import os
+import json
+import uuid
+from datetime import datetime
+import mysql.connector
+from mysql.connector import Error, pooling
+from typing import List, Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
+
+class MySQLClient:
+    """MySQL 数据库客户端"""
+    
+    def __init__(self):
+        self.host = os.getenv("MYSQL_HOST", "localhost")
+        self.port = int(os.getenv("MYSQL_PORT", "3306"))
+        self.database = os.getenv("MYSQL_DATABASE", "shop_agent_db")
+        self.username = os.getenv("MYSQL_USERNAME", "root")
+        self.password = os.getenv("MYSQL_PASSWORD", "123456")
+        self.connection = None
+    
+    def connect(self):
+        """建立数据库连接"""
+        try:
+            self.connection = mysql.connector.connect(
+                host=self.host,
+                port=self.port,
+                database=self.database,
+                user=self.username,
+                password=self.password,
+                use_unicode=True,
+                charset='utf8mb4',
+                time_zone='+08:00'
+            )
+            if self.connection.is_connected():
+                logger.info("Successfully connected to MySQL database")
+                # 设置会话时区
+                cursor = self.connection.cursor()
+                cursor.execute("SET time_zone = '+08:00'")
+                cursor.close()
+        except Error as e:
+            logger.error(f"Error connecting to MySQL: {e}")
+    
+    def disconnect(self):
+        """关闭数据库连接"""
+        if self.connection and self.connection.is_connected():
+            self.connection.close()
+            logger.info("MySQL connection closed")
+    
+    def insert_chunks(self, doc_id: int, chunks: List[Dict[str, Any]]):
+        """批量插入 chunks 到 knowledge_chunk 表"""
+        if not chunks:
+            return 0
+
+        if not self.connection or not self.connection.is_connected():
+            self.connect()
+
+        try:
+            self._ensure_clean_connection()
+            cursor = self.connection.cursor()
+            
+            # 先删除该文档已有的 chunks（避免重复）
+            delete_sql = "DELETE FROM knowledge_chunk WHERE doc_id = %s"
+            cursor.execute(delete_sql, (doc_id,))
+            
+            # 批量插入新 chunks
+            insert_sql = """
+                INSERT INTO knowledge_chunk (doc_id, chunk_index, chunk_text, create_time)
+                VALUES (%s, %s, %s, NOW())
+            """
+            
+            data = [
+                (doc_id, chunk.get('chunk_index', i), chunk.get('page_content', ''),)
+                for i, chunk in enumerate(chunks)
+            ]
+            
+            cursor.executemany(insert_sql, data)
+            self.connection.commit()
+            
+            inserted_count = cursor.rowcount
+            logger.info(f"Inserted {inserted_count} chunks for doc_id {doc_id}")
+            
+            cursor.close()
+            return inserted_count
+        
+        except Error as e:
+            logger.error(f"Error inserting chunks: {e}")
+            if self.connection:
+                self.connection.rollback()
+            return 0
+    
+    def get_chunk_count(self, doc_id: int = None) -> int:
+        """获取 chunk 数量"""
+        if not self.connection or not self.connection.is_connected():
+            self.connect()
+
+        try:
+            self._ensure_clean_connection()
+            cursor = self.connection.cursor()
+            
+            if doc_id:
+                sql = "SELECT COUNT(*) FROM knowledge_chunk WHERE doc_id = %s"
+                cursor.execute(sql, (doc_id,))
+            else:
+                sql = "SELECT COUNT(*) FROM knowledge_chunk"
+                cursor.execute(sql)
+            
+            result = cursor.fetchone()
+            cursor.close()
+            return result[0] if result else 0
+        
+        except Error as e:
+            logger.error(f"Error getting chunk count: {e}")
+            return 0
+
+    def _ensure_clean_connection(self):
+        """确保连接上没有未读结果（线程安全保护）"""
+        if self.connection and self.connection.is_connected():
+            try:
+                self.connection.consume_results()
+            except Exception:
+                pass
+
+    def fetch_one(self, sql: str, params: tuple = None) -> Dict[str, Any]:
+        """执行查询并返回单行结果"""
+        if not self.connection or not self.connection.is_connected():
+            self.connect()
+
+        try:
+            self._ensure_clean_connection()
+            cursor = self.connection.cursor(dictionary=True)
+
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
+
+            result = cursor.fetchone()
+            cursor.close()
+            return result
+
+        except Error as e:
+            logger.error(f"Error fetching one: {e}")
+            # 连接可能已损坏，重置
+            try:
+                self.connect()
+            except Exception:
+                pass
+            return None
+
+    def fetch_all(self, sql: str, params: tuple = None) -> List[Dict[str, Any]]:
+        """执行查询并返回所有结果"""
+        if not self.connection or not self.connection.is_connected():
+            self.connect()
+
+        try:
+            self._ensure_clean_connection()
+            cursor = self.connection.cursor(dictionary=True)
+
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
+
+            result = cursor.fetchall()
+            cursor.close()
+            return result
+
+        except Error as e:
+            logger.error(f"Error fetching all: {e}")
+            try:
+                self.connect()
+            except Exception:
+                pass
+            return []
+
+    def execute(self, sql: str, params: tuple = None) -> int:
+        """执行SQL语句（INSERT/UPDATE/DELETE）"""
+        if not self.connection or not self.connection.is_connected():
+            self.connect()
+
+        try:
+            self._ensure_clean_connection()
+            cursor = self.connection.cursor()
+
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
+
+            self.connection.commit()
+            affected_rows = cursor.rowcount
+            cursor.close()
+            return affected_rows
+
+        except Error as e:
+            logger.error(f"Error executing SQL: {e}")
+            if self.connection:
+                self.connection.rollback()
+            try:
+                self.connect()
+            except Exception:
+                pass
+            return 0
+
+    def insert_agent_run(self, run_id: str, trace_id: str, conversation_id: str,
+                         user_id: str, status: str, goal: str, intent: str,
+                         start_time: str, end_time: str,
+                         input_text: str, output_text: str,
+                         error_message: str = None, error_code: str = None,
+                         created_at: str = None):
+        """插入 Agent 运行记录"""
+        if not self.connection or not self.connection.is_connected():
+            self.connect()
+
+        try:
+            self._ensure_clean_connection()
+            cursor = self.connection.cursor()
+            record_id = str(uuid.uuid4())
+            sql = """
+                INSERT INTO agent_run
+                (id, run_id, trace_id, conversation_id, user_id, status, goal, intent,
+                 start_time, end_time, `input`, output, error_message, error_code, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            if created_at is None:
+                created_at = start_time
+            cursor.execute(sql, (
+                record_id, run_id, trace_id, conversation_id, user_id, status, goal, intent,
+                start_time, end_time, input_text, output_text,
+                error_message, error_code, created_at
+            ))
+            self.connection.commit()
+            cursor.close()
+            logger.info(f"Agent run recorded: run_id={run_id}, intent={intent}, status={status}")
+        except Error as e:
+            logger.error(f"Error inserting agent run: {e}")
+            if self.connection:
+                self.connection.rollback()
+
+    def insert_agent_step(self, run_id: str, step_type: str, step_name: str,
+                          status: str, input_data: str = None, output_data: str = None,
+                          error_message: str = None, duration_ms: float = None,
+                          start_time: str = None, end_time: str = None):
+        """插入 Agent 步骤记录"""
+        if not self.connection or not self.connection.is_connected():
+            self.connect()
+
+        try:
+            self._ensure_clean_connection()
+            cursor = self.connection.cursor()
+            record_id = str(uuid.uuid4())
+            sql = """
+                INSERT INTO agent_step
+                (id, run_id, step_type, step_name, status, input, output,
+                 error_message, duration_ms, start_time, end_time, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(sql, (
+                record_id, run_id, step_type, step_name, status,
+                input_data, output_data, error_message, duration_ms,
+                start_time or now, end_time or now, now
+            ))
+            self.connection.commit()
+            cursor.close()
+            logger.debug(f"Agent step recorded: run_id={run_id}, step={step_name}, status={status}")
+        except Error as e:
+            logger.error(f"Error inserting agent step: {e}")
+            if self.connection:
+                self.connection.rollback()
+
+    def insert_recommendation_log(self, user_id: str, session_id: str,
+                                   query: str, intent: str,
+                                   recommended_product_ids: list,
+                                   recommend_reason: str = None):
+        """插入推荐日志记录"""
+        if not self.connection or not self.connection.is_connected():
+            self.connect()
+
+        try:
+            self._ensure_clean_connection()
+            cursor = self.connection.cursor()
+            sql = """
+                INSERT INTO recommendation_log
+                (user_id, session_id, query, intent, recommended_product_ids,
+                 recommend_reason, create_time)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            """
+            import json as _json
+            cursor.execute(sql, (
+                user_id or None,
+                session_id or None,
+                query,
+                intent,
+                _json.dumps(recommended_product_ids, ensure_ascii=False) if recommended_product_ids else None,
+                recommend_reason
+            ))
+            self.connection.commit()
+            cursor.close()
+            logger.info(f"Recommendation log recorded: user_id={user_id}, products={recommended_product_ids}")
+        except Error as e:
+            logger.error(f"Error inserting recommendation log: {e}")
+            if self.connection:
+                self.connection.rollback()
+
+# 创建全局实例
+mysql_client = MySQLClient()
+
+
+class UserMemoryClient:
+    """用户记忆客户端（连接池版本）"""
+
+    _pool = None
+
+    @classmethod
+    def get_pool(cls):
+        """获取连接池（懒初始化，单例）"""
+        if cls._pool is None:
+            cls._pool = pooling.MySQLConnectionPool(
+                pool_name="user_memory_pool",
+                pool_size=10,               # 连接池大小
+                pool_reset_session=True,     # 归还连接时重置会话
+                host=os.getenv("MYSQL_HOST", "localhost"),
+                port=int(os.getenv("MYSQL_PORT", "3306")),
+                user=os.getenv("MYSQL_USERNAME", "root"),
+                password=os.getenv("MYSQL_PASSWORD", "123456"),
+                database=os.getenv("MYSQL_DATABASE", "shop_agent_db"),
+                charset="utf8mb4",
+                autocommit=True
+            )
+        return cls._pool
+
+    def _get_connection(self):
+        """从连接池获取连接"""
+        return self.get_pool().get_connection()
+
+    def get_user_memory(self, user_id: str) -> Dict[str, Any]:
+        """获取用户所有记忆"""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                "SELECT memory_key, memory_value FROM user_memory WHERE user_id = %s",
+                (user_id,)
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+        finally:
+            conn.close()  # 归还到连接池，不是真正关闭
+
+        memory = {}
+        for row in rows:
+            try:
+                memory[row["memory_key"]] = json.loads(row["memory_value"])
+            except:
+                memory[row["memory_key"]] = row["memory_value"]
+        return memory
+
+    def update_user_memory(self, user_id: str, key: str, value: Dict[str, Any],
+                           source: str = "agent", confidence: float = 1.0):
+        """更新用户记忆（upsert）"""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO user_memory (user_id, memory_key, memory_value, source, confidence)
+                VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    memory_value = VALUES(memory_value),
+                    source = VALUES(source),
+                    confidence = VALUES(confidence)
+            """, (user_id, key, json.dumps(value, ensure_ascii=False), source, confidence))
+            conn.commit()
+            cursor.close()
+        finally:
+            conn.close()  # 归还到连接池
+
+    def batch_get_user_memories(self, user_ids: list) -> Dict[str, Dict]:
+        """批量获取多个用户的记忆（减少连接获取次数）"""
+        if not user_ids:
+            return {}
+
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor(dictionary=True)
+            placeholders = ",".join(["%s"] * len(user_ids))
+            cursor.execute(
+                f"SELECT user_id, memory_key, memory_value FROM user_memory WHERE user_id IN ({placeholders})",
+                user_ids
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+        finally:
+            conn.close()
+
+        result = {uid: {} for uid in user_ids}
+        for row in rows:
+            try:
+                result[row["user_id"]][row["memory_key"]] = json.loads(row["memory_value"])
+            except:
+                result[row["user_id"]][row["memory_key"]] = row["memory_value"]
+        return result
+
+
+# 创建全局实例
+user_memory_client = UserMemoryClient()

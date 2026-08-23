@@ -1,0 +1,628 @@
+package com.evanyao.shopagent.navigation
+
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.ui.graphics.Color
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import androidx.navigation.NavDestination.Companion.hierarchy
+import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.evanyao.shopagent.ui.screens.auth.ChangePasswordScreen
+import com.evanyao.shopagent.ui.screens.auth.LoginScreen
+import com.evanyao.shopagent.ui.screens.auth.ProfileSetupScreen
+import com.evanyao.shopagent.ui.screens.auth.RegisterScreen
+import com.evanyao.shopagent.ui.screens.cart.CartScreen
+import com.evanyao.shopagent.ui.screens.chat.ChatScreen
+import com.evanyao.shopagent.ui.screens.product.ProductDetailScreen
+import com.evanyao.shopagent.ui.screens.product.ProductListScreen
+import com.evanyao.shopagent.ui.screens.profile.EditProfileScreen
+import com.evanyao.shopagent.ui.screens.profile.FavoritesScreen
+import com.evanyao.shopagent.ui.screens.profile.HistoryScreen
+import com.evanyao.shopagent.ui.screens.profile.ProfileScreen
+import com.evanyao.shopagent.ui.screens.profile.SettingsScreen
+import com.evanyao.shopagent.ui.screens.profile.AddressListScreen
+import com.evanyao.shopagent.ui.screens.profile.AddressEditScreen
+import com.evanyao.shopagent.ui.screens.profile.AboutScreen
+import com.evanyao.shopagent.ui.screens.order.CheckoutScreen
+import com.evanyao.shopagent.ui.screens.order.CheckoutItem
+import com.evanyao.shopagent.ui.screens.order.OrderListScreen
+import com.evanyao.shopagent.ui.screens.order.OrderDetailScreen
+import com.evanyao.shopagent.viewmodel.AuthViewModel
+import com.evanyao.shopagent.viewmodel.CartViewModel
+import com.evanyao.shopagent.viewmodel.ChatViewModel
+import com.evanyao.shopagent.viewmodel.FavoriteViewModel
+import com.evanyao.shopagent.viewmodel.HistoryViewModel
+import com.evanyao.shopagent.viewmodel.ProductViewModel
+import com.evanyao.shopagent.viewmodel.AddressViewModel
+import com.evanyao.shopagent.viewmodel.OrderViewModel
+import com.evanyao.shopagent.viewmodel.ProfileViewModel
+import com.evanyao.shopagent.util.AudioRecorder
+import org.koin.androidx.compose.koinViewModel
+import java.io.File
+
+/** 主导航图，管理所有页面路由和底部导航栏 */
+@Composable
+fun MainNavigation() {
+    val navController = rememberNavController()
+    // 所有 ViewModel 通过 Koin 注入，生命周期与 Activity 绑定
+    val authViewModel: AuthViewModel = koinViewModel()
+    val chatViewModel: ChatViewModel = koinViewModel()
+    val productViewModel: ProductViewModel = koinViewModel()
+    val cartViewModel: CartViewModel = koinViewModel()
+    val profileViewModel: ProfileViewModel = koinViewModel()
+    val favoriteViewModel: FavoriteViewModel = koinViewModel()
+    val historyViewModel: HistoryViewModel = koinViewModel()
+    val addressViewModel: AddressViewModel = koinViewModel()
+    val orderViewModel: OrderViewModel = koinViewModel()
+    val authState by authViewModel.uiState.collectAsState()
+    val cartState by cartViewModel.uiState.collectAsState()
+
+    // 监听聊天中的购物车操作事件，自动刷新购物车
+    LaunchedEffect(Unit) {
+        chatViewModel.cartEvent.collect {
+            cartViewModel.loadCartList()
+        }
+    }
+
+    // 结算页临时状态（购物车结算或立即购买）
+    var checkoutItems by remember { mutableStateOf<List<CheckoutItem>>(emptyList()) }
+
+    val bottomNavItems = listOf(
+        BottomNavItem.Chat,
+        BottomNavItem.Product,
+        BottomNavItem.Cart,
+        BottomNavItem.Profile
+    )
+
+    // tab路由 -> 索引，用于判断滑动方向
+    val tabIndexMap = mapOf(
+        Screen.Chat.route to 0,
+        Screen.ProductList.route to 1,
+        Screen.Cart.route to 2,
+        Screen.Profile.route to 3
+    )
+
+    // 监听登录状态变化，自动跳转
+    LaunchedEffect(authState.isLoggedIn) {
+        if (authState.isLoggedIn) {
+            chatViewModel.clearState()
+            chatViewModel.loadConversations()
+            if (authState.isProfileSetupDone) {
+                chatViewModel.loadRecommendations()
+                cartViewModel.refreshOnLogin()
+                navController.navigate(Screen.Chat.route) {
+                    popUpTo(Screen.Login.route) { inclusive = true }
+                }
+            } else {
+                navController.navigate(Screen.ProfileSetup.route) {
+                    popUpTo(Screen.Login.route) { inclusive = true }
+                }
+            }
+        }
+    }
+
+    Scaffold(
+        containerColor = Color.Transparent,
+        bottomBar = {
+            val navBackStackEntry by navController.currentBackStackEntryAsState()
+            val currentDestination = navBackStackEntry?.destination
+            val showBottomBar = currentDestination?.route in bottomNavItems.map { it.route }
+
+            if (showBottomBar) {
+                NavigationBar {
+                    bottomNavItems.forEach { item ->
+                        val selected = currentDestination?.hierarchy?.any { it.route == item.route } == true
+                        val cartItemCount = cartState.cartItems.size
+                        NavigationBarItem(
+                            icon = {
+                                if (item is BottomNavItem.Cart && cartItemCount > 0) {
+                                    BadgedBox(
+                                        badge = {
+                                            Badge {
+                                                Text(text = if (cartItemCount > 99) "99+" else "$cartItemCount")
+                                            }
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = if (selected) item.selectedIcon else item.unselectedIcon,
+                                            contentDescription = item.title
+                                        )
+                                    }
+                                } else {
+                                    Icon(
+                                        imageVector = if (selected) item.selectedIcon else item.unselectedIcon,
+                                        contentDescription = item.title
+                                    )
+                                }
+                            },
+                            label = { Text(item.title) },
+                            selected = selected,
+                            onClick = {
+                                navController.navigate(item.route) {
+                                    popUpTo(navController.graph.findStartDestination().id) {
+                                        saveState = true
+                                    }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    ) { innerPadding ->
+        NavHost(
+            navController = navController,
+            startDestination = Screen.Login.route,
+            modifier = Modifier.padding(innerPadding),
+            enterTransition = {
+                val fromIndex = tabIndexMap[initialState.destination.route]
+                val toIndex = tabIndexMap[targetState.destination.route]
+                if (fromIndex != null && toIndex != null) {
+                    // tab间切换：根据位置决定方向
+                    val direction = if (toIndex > fromIndex) 1 else -1
+                    slideInHorizontally(initialOffsetX = { it * direction }, animationSpec = tween(300)) +
+                            fadeIn(animationSpec = tween(300))
+                } else {
+                    // 非tab页面（详情、设置等）：默认从右滑入
+                    slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) +
+                            fadeIn(animationSpec = tween(300))
+                }
+            },
+            exitTransition = {
+                val fromIndex = tabIndexMap[initialState.destination.route]
+                val toIndex = tabIndexMap[targetState.destination.route]
+                if (fromIndex != null && toIndex != null) {
+                    val direction = if (toIndex > fromIndex) -1 else 1
+                    slideOutHorizontally(targetOffsetX = { it * direction }, animationSpec = tween(300)) +
+                            fadeOut(animationSpec = tween(300))
+                } else {
+                    slideOutHorizontally(targetOffsetX = { -it }, animationSpec = tween(300)) +
+                            fadeOut(animationSpec = tween(300))
+                }
+            },
+            popEnterTransition = {
+                slideInHorizontally(initialOffsetX = { -it }, animationSpec = tween(300)) +
+                        fadeIn(animationSpec = tween(300))
+            },
+            popExitTransition = {
+                slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) +
+                        fadeOut(animationSpec = tween(300))
+            }
+        ) {
+            composable(Screen.Login.route) {
+                LoginScreen(
+                    onLogin = { phone, password ->
+                        authViewModel.login(phone, password)
+                    },
+                    onNavigateToRegister = {
+                        navController.navigate(Screen.Register.route)
+                    },
+                    isLoading = authState.isLoading,
+                    errorMessage = authState.errorMessage
+                )
+            }
+            composable(Screen.Register.route) {
+                RegisterScreen(
+                    onRegister = { phone, code, password, username ->
+                        authViewModel.register(phone, code, password, username)
+                    },
+                    onSendCode = { phone ->
+                        authViewModel.sendCode(phone)
+                    },
+                    onNavigateToLogin = {
+                        navController.popBackStack()
+                    },
+                    isLoading = authState.isLoading,
+                    errorMessage = authState.errorMessage
+                )
+            }
+            composable(Screen.ProfileSetup.route) {
+                // 监听引导页完成，异步保存成功后再加载推荐
+                LaunchedEffect(authState.isProfileSetupDone) {
+                    if (authState.isProfileSetupDone) {
+                        chatViewModel.loadRecommendations()
+                        cartViewModel.refreshOnLogin()
+                        navController.navigate(Screen.Chat.route) {
+                            popUpTo(Screen.ProfileSetup.route) { inclusive = true }
+                        }
+                    }
+                }
+                ProfileSetupScreen(
+                    onComplete = { gender, ageRange, skinType, tags ->
+                        authViewModel.saveProfileSetup(gender, ageRange, skinType, tags)
+                    },
+                    onSkip = {
+                        authViewModel.skipProfileSetup()
+                    }
+                )
+            }
+            composable(Screen.Chat.route) {
+                val context = LocalContext.current
+
+                // 对话页：图片选择状态
+                var chatImageUri by remember { mutableStateOf<Uri?>(null) }
+                var showImageSourceDialog by remember { mutableStateOf(false) }
+
+                // 录音相关状态
+                val audioRecorder = remember { AudioRecorder(context) }
+                var audioFile by remember { mutableStateOf<File?>(null) }
+
+                // 录音权限 launcher
+                val recordAudioLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.RequestPermission()
+                ) { granted ->
+                    if (granted) {
+                        // 权限 granted，开始录音
+                        audioFile = audioRecorder.startRecording()
+                        chatViewModel.startRecording()
+                    }
+                }
+
+                // 相机拍照 launcher
+                val chatCameraLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.TakePicture()
+                ) { success ->
+                    if (success && chatImageUri != null) {
+                        chatViewModel.sendPhotoFromUri(chatImageUri!!, context)
+                        chatImageUri = null
+                    }
+                }
+
+                // 相机权限 launcher
+                val chatCameraPermissionLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.RequestPermission()
+                ) { granted ->
+                    if (granted) {
+                        val imageFile = File(context.cacheDir, "chat_photo_${System.currentTimeMillis()}.jpg")
+                        chatImageUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", imageFile)
+                        chatCameraLauncher.launch(chatImageUri!!)
+                    }
+                }
+
+                // 相册选择 launcher
+                val chatPhotoPickerLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.PickVisualMedia()
+                ) { uri ->
+                    if (uri != null) {
+                        chatViewModel.sendPhotoFromUri(uri, context)
+                    }
+                }
+
+                // 图片来源选择弹窗
+                if (showImageSourceDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showImageSourceDialog = false },
+                        title = { Text("选择图片来源") },
+                        text = {
+                            Column {
+                                TextButton(
+                                    onClick = {
+                                        showImageSourceDialog = false
+                                        chatCameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.PhotoCamera, contentDescription = null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("拍照")
+                                }
+                                TextButton(
+                                    onClick = {
+                                        showImageSourceDialog = false
+                                        chatPhotoPickerLauncher.launch(
+                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                        )
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.PhotoLibrary, contentDescription = null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("从相册选择")
+                                }
+                            }
+                        },
+                        confirmButton = {},
+                        dismissButton = {
+                            TextButton(onClick = { showImageSourceDialog = false }) {
+                                Text("取消")
+                            }
+                        }
+                    )
+                }
+
+                ChatScreen(
+                    viewModel = chatViewModel,
+                    onProductClick = { productId ->
+                        navController.navigate(Screen.ProductDetail.createRoute(productId))
+                    },
+                    onAddToCart = { productIds ->
+                        productIds.forEach { id -> cartViewModel.addToCart(id) }
+                    },
+                    onCameraClick = { showImageSourceDialog = true },
+                    onVoiceStart = {
+                        // 请求录音权限
+                        recordAudioLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                    },
+                    onVoiceEnd = {
+                        // 停止录音并发送
+                        chatViewModel.stopRecording()
+                        val file = audioRecorder.stopRecording()
+                        if (file != null && file.exists() && file.length() > 0) {
+                            chatViewModel.sendVoiceFile(file)
+                        }
+                    }
+                )
+            }
+            composable(Screen.ProductList.route) {
+                ProductListScreen(
+                    viewModel = productViewModel,
+                    onProductClick = { productId ->
+                        navController.navigate(Screen.ProductDetail.createRoute(productId))
+                    }
+                )
+            }
+            composable(
+                route = Screen.ProductDetail.route,
+                arguments = listOf(navArgument("productId") { type = NavType.LongType })
+            ) { backStackEntry ->
+                val productId = backStackEntry.arguments?.getLong("productId") ?: return@composable
+                ProductDetailScreen(
+                    viewModel = productViewModel,
+                    productId = productId,
+                    onBack = { navController.popBackStack() },
+                    onAddToCart = { id, skuId -> cartViewModel.addToCart(id, skuId) },
+                    onBuyNow = { product, sku ->
+                        checkoutItems = listOf(
+                            CheckoutItem(
+                                productId = product.id,
+                                skuId = sku?.id,
+                                title = product.title,
+                                image = product.imageUrl,
+                                skuText = sku?.properties?.entries?.joinToString(" ") { "${it.key}: ${it.value}" } ?: "默认",
+                                price = sku?.price ?: product.basePrice,
+                                quantity = 1
+                            )
+                        )
+                        navController.navigate(Screen.Checkout.createRoute())
+                    }
+                )
+            }
+            composable(Screen.Cart.route) {
+                CartScreen(
+                    viewModel = cartViewModel,
+                    onProductClick = { productId ->
+                        navController.navigate(Screen.ProductDetail.createRoute(productId))
+                    },
+                    onCheckout = {
+                        val selected = cartState.cartItems.filter { cartState.selectedItems.contains(it.productId) }
+                        if (selected.isNotEmpty()) {
+                            checkoutItems = selected.map { cartItem ->
+                                CheckoutItem(
+                                    productId = cartItem.productId,
+                                    skuId = cartItem.skuId,
+                                    title = cartItem.product?.title ?: "",
+                                    image = cartItem.product?.imageUrl,
+                                    skuText = cartItem.skuText,
+                                    price = cartItem.sku?.price ?: cartItem.product?.basePrice ?: java.math.BigDecimal.ZERO,
+                                    quantity = cartItem.quantity
+                                )
+                            }
+                            navController.navigate(Screen.Checkout.createRoute())
+                        }
+                    },
+                    onNavigateToProducts = {
+                        navController.navigate(Screen.ProductList.route) {
+                            popUpTo(navController.graph.findStartDestination().id) {
+                                saveState = true
+                            }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    }
+                )
+            }
+            composable(Screen.Profile.route) {
+                ProfileScreen(
+                    viewModel = profileViewModel,
+                    phone = authState.phone,
+                    onSettingsClick = {
+                        navController.navigate(Screen.Settings.route)
+                    },
+                    onEditProfileClick = {
+                        navController.navigate(Screen.EditProfile.route)
+                    },
+                    onFavoritesClick = {
+                        navController.navigate(Screen.Favorites.route)
+                    },
+                    onHistoryClick = {
+                        navController.navigate(Screen.History.route)
+                    },
+                    onOrdersClick = {
+                        navController.navigate(Screen.OrderList.route)
+                    },
+                    onAddressClick = {
+                        navController.navigate(Screen.AddressList.route)
+                    },
+                    onAboutClick = {
+                        navController.navigate(Screen.About.route)
+                    }
+                )
+            }
+            composable(Screen.Favorites.route) {
+                FavoritesScreen(
+                    viewModel = favoriteViewModel,
+                    onBack = { navController.popBackStack() },
+                    onProductClick = { productId ->
+                        navController.navigate(Screen.ProductDetail.createRoute(productId))
+                    }
+                )
+            }
+            composable(Screen.History.route) {
+                HistoryScreen(
+                    viewModel = historyViewModel,
+                    onBack = { navController.popBackStack() },
+                    onProductClick = { productId ->
+                        navController.navigate(Screen.ProductDetail.createRoute(productId))
+                    }
+                )
+            }
+            composable(Screen.Settings.route) {
+                SettingsScreen(
+                    onBack = { navController.popBackStack() },
+                    onLogout = {
+                        authViewModel.logout()
+                        chatViewModel.clearState()
+                        cartViewModel.clearState()
+                        productViewModel.clearState()
+                        favoriteViewModel.clearState()
+                        historyViewModel.clearState()
+                        addressViewModel.clearState()
+                        orderViewModel.clearState()
+                        profileViewModel.clearState()
+                        navController.navigate(Screen.Login.route) {
+                            popUpTo(0) { inclusive = true }
+                        }
+                    },
+                    onChangePassword = {
+                        navController.navigate(Screen.ChangePassword.route)
+                    }
+                )
+            }
+            composable(Screen.ChangePassword.route) {
+                val authState by authViewModel.uiState.collectAsState()
+                LaunchedEffect(authState.changePasswordSuccess) {
+                    if (authState.changePasswordSuccess) {
+                        authViewModel.clearChangePasswordSuccess()
+                        navController.popBackStack()
+                    }
+                }
+                ChangePasswordScreen(
+                    isLoading = authState.isLoading,
+                    errorMessage = authState.errorMessage,
+                    onBack = { navController.popBackStack() },
+                    onSubmit = { oldPwd, newPwd ->
+                        authViewModel.changePassword(oldPwd, newPwd)
+                    },
+                    onClearError = { authViewModel.clearError() }
+                )
+            }
+            composable(Screen.EditProfile.route) {
+                EditProfileScreen(
+                    viewModel = profileViewModel,
+                    onBack = { navController.popBackStack() }
+                )
+            }
+            composable(Screen.AddressList.route) {
+                AddressListScreen(
+                    viewModel = addressViewModel,
+                    onBack = { navController.popBackStack() },
+                    onAddClick = {
+                        navController.navigate(Screen.AddressEdit.createRoute())
+                    },
+                    onEditClick = { addressId ->
+                        navController.navigate(Screen.AddressEdit.createRoute(addressId))
+                    }
+                )
+            }
+            composable(
+                route = Screen.AddressEdit.route,
+                arguments = listOf(navArgument("addressId") { type = NavType.LongType })
+            ) { backStackEntry ->
+                val addressId = backStackEntry.arguments?.getLong("addressId")?.let { id ->
+                    if (id == -1L) null else id
+                }
+                AddressEditScreen(
+                    viewModel = addressViewModel,
+                    editId = addressId,
+                    onBack = { navController.popBackStack() }
+                )
+            }
+            composable(Screen.About.route) {
+                AboutScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+            composable(Screen.OrderList.route) {
+                OrderListScreen(
+                    viewModel = orderViewModel,
+                    onBack = { navController.popBackStack() },
+                    onOrderClick = { orderId ->
+                        navController.navigate(Screen.OrderDetail.createRoute(orderId))
+                    }
+                )
+            }
+            composable(
+                route = Screen.OrderDetail.route,
+                arguments = listOf(navArgument("orderId") { type = NavType.LongType })
+            ) { backStackEntry ->
+                val orderId = backStackEntry.arguments?.getLong("orderId") ?: return@composable
+                OrderDetailScreen(
+                    viewModel = orderViewModel,
+                    orderId = orderId,
+                    onBack = { navController.popBackStack() },
+                    onPaymentSuccess = { productIds ->
+                        cartViewModel.removeItemsByProductIds(productIds)
+                    }
+                )
+            }
+            composable(
+                route = Screen.Checkout.route,
+                arguments = listOf(navArgument("addressId") { type = NavType.LongType })
+            ) {
+                // 加载地址列表和用户信息
+                LaunchedEffect(Unit) {
+                    addressViewModel.loadAddressList()
+                    profileViewModel.loadProfile()
+                }
+                val addressState by addressViewModel.uiState.collectAsState()
+                val profileState by profileViewModel.uiState.collectAsState()
+                val defaultAddress = addressState.addressList.firstOrNull { it.isDefault }
+                    ?: addressState.addressList.firstOrNull()
+
+                CheckoutScreen(
+                    orderViewModel = orderViewModel,
+                    checkoutItems = checkoutItems,
+                    defaultAddress = defaultAddress,
+                    user = profileState.user,
+                    onBack = { navController.popBackStack() },
+                    onAddressClick = {
+                        navController.navigate(Screen.AddressList.route)
+                    },
+                    onOrderCreated = { orderId ->
+                        // 订单创建成功，跳转订单详情（不立即清购物车，支付后再问）
+                        navController.navigate(Screen.OrderDetail.createRoute(orderId)) {
+                            popUpTo(Screen.Cart.route) { inclusive = false }
+                        }
+                    }
+                )
+            }
+        }
+    }
+}

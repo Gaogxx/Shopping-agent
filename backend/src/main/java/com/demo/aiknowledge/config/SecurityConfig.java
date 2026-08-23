@@ -1,0 +1,113 @@
+package com.demo.aiknowledge.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import lombok.RequiredArgsConstructor;
+
+import java.util.Arrays;
+
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity
+@RequiredArgsConstructor
+public class SecurityConfig {
+
+    private final JwtFilter jwtFilter;
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+            // 禁用CSRF保护，对于前后端分离的应用
+            .csrf(csrf -> csrf.disable())
+            // 启用CORS支持
+            .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+            // 配置请求授权
+            .authorizeHttpRequests(auth -> auth
+                // 允许OPTIONS预检请求
+                .requestMatchers(org.springframework.http.HttpMethod.OPTIONS, "/**").permitAll()
+                // 登录注册相关接口允许匿名访问
+                .requestMatchers("/api/auth/sendCode").permitAll()
+                .requestMatchers("/api/auth/register").permitAll()
+                .requestMatchers("/api/auth/login").permitAll()
+                .requestMatchers("/api/auth/refresh").permitAll()
+                // 用户资料接口需要认证
+                .requestMatchers("/api/auth/profile").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/auth/update").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/auth/changePassword").hasAnyRole("USER", "ADMIN")
+                // 允许所有/api/admin/login请求
+                .requestMatchers("/api/admin/login").permitAll()
+                // 允许图片访问路径
+                .requestMatchers("/api/chat/view/image/**").permitAll()
+                // 允许商品图片静态资源访问
+                .requestMatchers("/product-images/**").permitAll()
+                // 允许错误页面访问（SSE 流结束后异步分发需要）
+                .requestMatchers("/error").permitAll()
+                // 允许商品只读接口匿名访问
+                .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/product/list").permitAll()
+                .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/product/{id}").permitAll()
+                .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/product/search").permitAll()
+                .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/product/hot").permitAll()
+                .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/category/list").permitAll()
+                // 管理员对话管理接口允许USER和ADMIN访问
+                .requestMatchers("/api/admin/conversations").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/admin/conversations/**").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/admin/conversation/**").hasAnyRole("ADMIN")
+                .requestMatchers("/api/admin/products").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/admin/products/**").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/admin/product/**").hasAnyRole("ADMIN")
+                .requestMatchers("/api/admin/order/**").hasAnyRole("ADMIN")
+                .requestMatchers("/api/admin-chat/**").hasAnyRole("ADMIN")
+                .requestMatchers("/api/admin/knowledge-inspection/**").hasAnyRole("ADMIN")
+                .requestMatchers("/api/admin/recommend/**").hasAnyRole("USER", "ADMIN")
+                // 管理员接口需要ADMIN角色
+                .requestMatchers("/api/admin/**").hasRole("ADMIN")
+                // 用户接口需要USER或ADMIN角色
+                .requestMatchers("/api/chat/**").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/knowledge/**").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/category/**").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/product/**").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/recommend/**").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/address/**").hasAnyRole("USER", "ADMIN")
+                .requestMatchers("/api/order/**").hasAnyRole("USER", "ADMIN")
+                // 其他请求需要认证
+                .anyRequest().authenticated()
+            )
+            // 添加JWT过滤器
+            .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+            // 禁用默认的登录表单
+            .formLogin(form -> form.disable())
+            // 禁用默认的HTTP基本认证
+            .httpBasic(httpBasic -> httpBasic.disable());
+
+        // 配置无状态会话管理
+        http.sessionManagement(session -> session
+            .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+        );
+
+        return http.build();
+    }
+
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration configuration = new CorsConfiguration();
+        configuration.setAllowedOriginPatterns(Arrays.asList("*")); // 允许所有来源，开发环境使用
+        configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        configuration.setAllowedHeaders(Arrays.asList("*"));
+        configuration.setAllowCredentials(true);
+        configuration.setExposedHeaders(Arrays.asList("Authorization")); // 允许前端访问Authorization header
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/api/**", configuration);
+        return source;
+    }
+}
